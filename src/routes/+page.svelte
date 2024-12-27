@@ -1,2 +1,9 @@
 <h1>Welcome to SvelteKit</h1>
-<p>Visit <a href="https://svelte.dev/docs/kit">svelte.dev/docs/kit</a> to read the documentation</p>
+<div class="flex items-center gap-4">
+	<button type="button" class="btn-icon preset-filled">&rarr;</button>
+	<button type="button" class="btn preset-filled">Button</button>
+	<button type="button" class="btn preset-filled">
+		<span>Button</span>
+		<span>&rarr;</span>
+	</button>
+</div>
