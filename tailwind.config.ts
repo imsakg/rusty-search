@@ -5,6 +5,7 @@ import type { Config } from 'tailwindcss';
 
 import { skeleton, contentPath } from '@skeletonlabs/skeleton/plugin';
 import newyork from './src/themes/newyork';
+import tailwindScrollbar from 'tailwind-scrollbar';
 
 export default {
 	content: ['./src/**/*.{html,js,svelte,ts}', contentPath(import.meta.url, 'svelte')],
@@ -20,6 +21,7 @@ export default {
 		skeleton({
 			// NOTE: each theme included will increase the size of your CSS bundle
 			themes: [newyork]
-		})
+		}),
+		tailwindScrollbar({ nocompatible: true, preferredStrategy: 'pseudoelements' })
 	]
 } satisfies Config;

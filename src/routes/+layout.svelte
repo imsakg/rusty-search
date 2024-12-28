@@ -3,7 +3,7 @@
 	let { children } = $props();
 
 	/// Skeleton Components
-	import { AppBar } from '@skeletonlabs/skeleton-svelte';
+	import { AppBar, ToastProvider } from '@skeletonlabs/skeleton-svelte';
 	import { Navigation } from '@skeletonlabs/skeleton-svelte';
 
 	/// Icons
@@ -22,14 +22,14 @@
 
 	const appWindow = getCurrentWindow();
 
-	let sidebarStatus = $state(0);
+	let sidebarStatus = $state(1);
 
 	document.getElementById('titlebar')?.addEventListener('mousedown', (e) => {});
 </script>
 
-<div class="grid h-screen grid-rows-[auto_1fr_auto]">
+<div class="grid h-screen max-h-screen grid-rows-[auto_1fr_auto]">
 	<!-- Header -->
-	<header>
+	<header class="sticky top-0 z-50">
 		<AppBar
 			headlineClasses="hidden"
 			centerClasses="hidden sm:block"
@@ -53,14 +53,29 @@
 				</Navigation.Tile>
 			{/snippet}
 			{#snippet trail()}
-				<Navigation.Tile id="menu-toggle" labelExpanded="Menu" rounded="false">
+				<Navigation.Tile
+					id="menu-minimize"
+					labelExpanded="Menu"
+					rounded="false"
+					onclick={() => appWindow.minimize()}
+				>
 					<icons.Minimize /></Navigation.Tile
 				>
-				<Navigation.Tile id="menu-toggle" labelExpanded="Menu" rounded="false">
+				<Navigation.Tile
+					id="menu-maximize"
+					labelExpanded="Menu"
+					rounded="false"
+					onclick={() => appWindow.toggleMaximize()}
+				>
 					<icons.Maximize /></Navigation.Tile
 				>
 
-				<Navigation.Tile id="menu-toggle" labelExpanded="Menu" rounded="false">
+				<Navigation.Tile
+					id="menu-close"
+					labelExpanded="Menu"
+					rounded="false"
+					onclick={() => appWindow.close()}
+				>
 					<icons.X /></Navigation.Tile
 				>
 			{/snippet}
@@ -90,9 +105,9 @@
 		</AppBar>
 	</header>
 	<!-- Grid Columns -->
-	<div class="flex flex-row">
+	<div class="grid h-full grid-cols-[auto_1fr_auto] overflow-hidden">
 		<!-- Left Sidebar. -->
-		<aside>
+		<aside class="max-h-screen">
 			{#if sidebarStatus > 0}
 				<div
 					class="card grid h-full w-full grid-cols-[auto_1fr]"
@@ -140,20 +155,15 @@
 				</div>
 			{/if}
 		</aside>
-		<div class="flex h-full w-full flex-col">
+		<div
+			class="flex h-full w-full flex-col overflow-y-auto scrollbar-thin scrollbar-track-slate-900 scrollbar-thumb-slate-600 scrollbar-track-rounded-full"
+		>
 			<!-- Main Content -->
-			<div class="flex h-full items-center justify-center">
-				<main>
+			<main class=" flex h-full w-full flex-col items-center justify-center">
+				<ToastProvider>
 					{@render children()}
-				</main>
-			</div>
-
-			<!-- Footer -->
-			<footer>
-				<div class="flex items-center justify-center">
-					<p class="text-xs text-gray-500">&copy; Rusty Search</p>
-				</div>
-			</footer>
+				</ToastProvider>
+			</main>
 		</div>
 	</div>
 </div>
