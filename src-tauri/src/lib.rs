@@ -1,11 +1,25 @@
 use std::io::Read;
+use std::time::Duration;
 use std::{fs::File, io::Write};
 
 use anyhow::Result;
+use crawler::run_crawler;
+use spider::auto_encoder::is_binary_file;
+use spider::configuration::{Configuration, WaitForIdleNetwork};
+use spider::features::chrome_common::RequestInterceptConfiguration;
 use spider::hashbrown::HashSet;
-use std::sync::Mutex;
+use spider::tokio;
+use spider::website::Website;
+use std::sync::{Arc, Mutex};
 use tauri::{path::BaseDirectory, Manager};
+use tauri::{Emitter, Listener};
 use tauri_plugin_log::fern::colors::ColoredLevelConfig;
+use tokio::io::AsyncWriteExt;
+use tokio::time::Instant;
+
+use spider_utils::spider_transformations::transformation::content::{
+    transform_content, ReturnFormat, TransformConfig,
+};
 
 use url::Url;
 
@@ -47,17 +61,126 @@ fn write_state_to_db(
     true
 }
 
+#[tauri::command(async)]
+async fn start_crawler(
+    target_url: String,
+    handle: tauri::AppHandle,
+    reader: tauri::ipc::Channel<String>,
+) -> tauri::Result<()> {
+    let mut stdout = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+    let target_url = Url::parse(&target_url).unwrap();
+    let reader_guard = Arc::new(tokio::sync::Mutex::new(reader));
+
+    let mut interception = RequestInterceptConfiguration::new(true);
+
+    interception.block_javascript = true;
+
+    log::debug!("Starting crawling with new url: {}", target_url);
+    let website_rc = Arc::new(tokio::sync::Mutex::new(Website::new(target_url.as_str())));
+    let website = website_rc.clone();
+    website.lock().await.with_config(
+        Configuration::new()
+            .with_limit(100)
+            .with_block_assets(true)
+            .with_caching(true)
+            .with_stealth(true)
+            .with_fingerprint(true)
+            .with_chrome_intercept(interception, &None)
+            .with_wait_for_idle_network(Some(WaitForIdleNetwork::new(Some(Duration::from_millis(
+                500,
+            )))))
+            .to_owned(),
+    );
+
+    let app_handle = handle.app_handle().clone();
+
+    let event_id = app_handle.listen("status-changed", move |event| {
+        let website = website.clone();
+        let app_handle2 = handle.app_handle().clone();
+        let reader_guard = reader_guard.clone();
+
+        tauri::async_runtime::spawn(async move {
+            reader_guard
+                .lock()
+                .await
+                .send("Crawler Stopped".to_string())
+                .unwrap();
+            website.lock().await.unsubscribe();
+            website.lock().await.stop();
+        });
+    });
+    let website = website_rc.clone();
+
+    let mut rx2 = website.lock().await.subscribe(0).unwrap();
+
+    let stdout_guard = stdout.clone();
+    tokio::spawn(async move {
+        let conf = TransformConfig {
+            return_format: ReturnFormat::Markdown,
+            readability: true,
+            filter_images: true,
+            clean_html: true,
+            filter_svg: true,
+            main_content: true,
+        };
+
+        while let Ok(res) = rx2.recv().await {
+            if is_binary_file(res.get_html_bytes_u8()) {
+                continue;
+            }
+
+            let markup = transform_content(&res, &conf, &None, &None, &None);
+
+            let mut stdout = stdout_guard.lock().await;
+
+            stdout
+                .write_all(format!("- {}\n {}\n\n\n", res.get_url(), markup).as_bytes())
+                .await
+                .unwrap();
+
+            stdout.flush().await.unwrap();
+        }
+    });
+
+    let start = std::time::Instant::now();
+    website.lock().await.crawl_smart().await;
+    website.lock().await.unsubscribe();
+    let duration = start.elapsed();
+    let stdout_guard = stdout.clone();
+    let mut stdout = stdout_guard.lock().await;
+
+    let _ = stdout
+        .write_all(
+            format!(
+                "Time elapsed in website.crawl() is: {:?} for total pages: {:?}\n",
+                duration,
+                website.lock().await.get_size().await
+            )
+            .as_bytes(),
+        )
+        .await;
+    stdout.flush().await.unwrap();
+
+    app_handle.unlisten(event_id);
+    Ok(())
+}
+
 #[tauri::command]
 fn add_new_url(state: tauri::State<'_, Mutex<AppState>>, url: String) -> tauri::Result<bool> {
-    let url = Url::parse(&url).unwrap();
-    let mut state = state.lock().unwrap();
-    if state.url_list.contains(&url) {
-        log::info!("URL already exists: {}", url);
-        return Ok(false);
+    if let Ok(url) = Url::parse(&url) {
+        log::debug!("Parsed URL: {}", url);
+        let mut state = state.lock().unwrap();
+        if state.url_list.contains(&url) {
+            log::debug!("URL already exists: {}", url);
+            return Ok(false);
+        }
+        log::debug!("Added new URL: {}", &url);
+        state.url_list.insert(url);
+        Ok(true)
+    } else {
+        log::error!("Could not parse URL: {}", url);
+        Ok(false)
     }
-    log::info!("Added new URL: {}", &url);
-    state.url_list.insert(url);
-    Ok(true)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -66,14 +189,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .with_colors(ColoredLevelConfig::new())
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // if cfg!(debug_assertions) {
+            //     app.handle().plugin(
+            //         tauri_plugin_log::Builder::default()
+            //             .with_colors(ColoredLevelConfig::new())
+            //             .level(log::LevelFilter::Debug)
+            //             .build(),
+            //     )?;
+            // }
             // Initialize the app state
             app.manage(Mutex::new(AppState::default()));
 
@@ -90,9 +213,9 @@ pub fn run() {
                 let mut state = guard.lock().unwrap();
                 for url in urls {
                     if let Ok(url) = Url::parse(url) {
-                        log::info!("Parsed URL loading: {}", url);
+                        log::debug!("Parsed URL loading: {}", url);
                         if state.url_list.insert(url) {
-                            log::info!("URL loaded");
+                            log::debug!("URL loaded");
                         } else {
                             log::warn!("URL already exists!");
                         }
@@ -100,7 +223,7 @@ pub fn run() {
                         log::error!("Could not parse URL: {}", url);
                     }
                 }
-                log::info!("Loaded {} sites", state.url_list.len());
+                log::debug!("Loaded {} sites", state.url_list.len());
             }
 
             // Window management
@@ -125,7 +248,12 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, get_sitelist, add_new_url])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            get_sitelist,
+            add_new_url,
+            start_crawler
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

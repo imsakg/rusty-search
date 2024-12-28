@@ -20,13 +20,12 @@
 	// When using the Tauri API npm package:
 	import { invoke } from '@tauri-apps/api/core';
 
-	// Libs
-	import type { SourceData } from '$lib/types';
-	import { sources } from '$lib/stores';
-
 	// When using the Tauri global script (if not using the npm package)
 	// Be sure to set `app.withGlobalTauri` in `tauri.conf.json` to true
 	// const invoke = window.__TAURI__.core.invoke;
+
+	// Libs
+	import { sources } from '$lib/stores';
 
 	// Stores
 	const sourceData = sources;
@@ -62,8 +61,11 @@
 		modalOpenState = false;
 		if (result) {
 			sourceData.update(($sourceData) => {
-				$sourceData.push({
-					position: $sourceData.length + 1,
+				$sourceData.forEach((item, _) => {
+					item.position += +1;
+				});
+				$sourceData.unshift({
+					position: 1,
 					url: url,
 					active: true
 				});
@@ -77,7 +79,7 @@
 		} else {
 			await toast.create({
 				title: 'Error',
-				description: 'Failed to add new URL! It could be a duplicate.',
+				description: 'Failed! It could be a duplicate or invalid URL',
 				type: 'error'
 			});
 		}
@@ -149,9 +151,9 @@
 						<label for="url" class="label max-w-fit">Source URL</label>
 						<input
 							type="text"
-							id="url"
+							id="urlInput"
 							name="url"
-							class="input w-full"
+							class="input-primary input"
 							placeholder="https://example.com"
 						/>
 					</div>
@@ -169,7 +171,9 @@
 							type="button"
 							class="btn preset-filled"
 							onclick={() => {
-								add_new_url('https://example.com');
+								const urlInput = document.getElementById('urlInput') as HTMLInputElement;
+								console.log(urlInput.value);
+								if (urlInput) add_new_url(urlInput.value);
 							}}>Confirm</button
 						>
 					</footer>
