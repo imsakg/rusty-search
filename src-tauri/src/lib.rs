@@ -68,11 +68,15 @@ async fn start_crawler(
     reader: tauri::ipc::Channel<String>,
 ) -> tauri::Result<()> {
     let target_url = Url::parse(&target_url).unwrap();
+    let website_rc = Arc::new(tokio::sync::Mutex::new(Website::new(target_url.as_str())));
 
-    log::debug!("Starting crawling with new url: {}", target_url);
+    println!("Starting crawler for {}", target_url);
 
-    let crawled = run_crawler(&target_url.to_string()).await.unwrap();
-    println!("{:?}", crawled);
+    let t1 = Instant::now();
+    let crawled = run_crawler(website_rc.clone()).await.unwrap();
+    let tt = t1.elapsed();
+
+    println!("Crawled {} pages in {:?}", crawled.len(), tt);
 
     // let app_handle = handle.app_handle().clone();
 

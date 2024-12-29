@@ -3,15 +3,15 @@ use spider::{configuration::Configuration, tokio};
 
 use std::time::Duration;
 
+use anyhow::Result;
 use spider::auto_encoder::is_binary_file;
 use spider::configuration::WaitForIdleNetwork;
-use std::sync::{Arc, Mutex};
-
-use anyhow::Result;
 use spider::hashbrown::HashMap;
+use spider::tokio::sync::Mutex;
 use spider_utils::spider_transformations::transformation::content::{
     transform_content, ReturnFormat, TransformConfig,
 };
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum Content {
@@ -19,12 +19,10 @@ pub enum Content {
     Binary,
 }
 
-pub async fn run_crawler(target_url: &str) -> Result<HashMap<String, Option<Content>>> {
-    let website_rc = Arc::new(tokio::sync::Mutex::new(Website::new(target_url)));
-    let website = website_rc.clone();
-    website.lock().await.with_config(
+pub async fn run_crawler(crawler: Arc<Mutex<Website>>) -> Result<HashMap<String, Option<Content>>> {
+    crawler.lock().await.with_config(
         Configuration::new()
-            .with_limit(1000)
+            .with_limit(10000)
             .with_block_assets(true)
             .with_caching(true)
             .with_stealth(true)
@@ -35,7 +33,7 @@ pub async fn run_crawler(target_url: &str) -> Result<HashMap<String, Option<Cont
             .to_owned(),
     );
 
-    let mut rx2 = website.lock().await.subscribe(0).unwrap();
+    let mut rx2 = crawler.lock().await.subscribe(0).unwrap();
 
     let map = Arc::new(Mutex::new(HashMap::new()));
 
@@ -52,7 +50,7 @@ pub async fn run_crawler(target_url: &str) -> Result<HashMap<String, Option<Cont
         while let Ok(res) = rx2.recv().await {
             let content;
             let markup;
-            let mut map = map_guard.lock().unwrap();
+            let mut map = map_guard.lock().await;
 
             if let Some(b) = res.get_bytes() {
                 if is_binary_file(b) || b.len() > 1024 * 1024 {
@@ -70,8 +68,8 @@ pub async fn run_crawler(target_url: &str) -> Result<HashMap<String, Option<Cont
         }
     });
 
-    website.lock().await.crawl_smart().await;
-    website.lock().await.unsubscribe();
-    let map = Arc::try_unwrap(map).unwrap().into_inner().unwrap();
+    crawler.lock().await.crawl_smart().await;
+    crawler.lock().await.unsubscribe();
+    let map = Arc::try_unwrap(map).unwrap().into_inner();
     anyhow::Result::Ok(map)
 }
