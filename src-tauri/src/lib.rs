@@ -67,101 +67,33 @@ async fn start_crawler(
     handle: tauri::AppHandle,
     reader: tauri::ipc::Channel<String>,
 ) -> tauri::Result<()> {
-    let mut stdout = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     let target_url = Url::parse(&target_url).unwrap();
-    let reader_guard = Arc::new(tokio::sync::Mutex::new(reader));
-
-    let mut interception = RequestInterceptConfiguration::new(true);
-
-    interception.block_javascript = true;
 
     log::debug!("Starting crawling with new url: {}", target_url);
-    let website_rc = Arc::new(tokio::sync::Mutex::new(Website::new(target_url.as_str())));
-    let website = website_rc.clone();
-    website.lock().await.with_config(
-        Configuration::new()
-            .with_limit(100)
-            .with_block_assets(true)
-            .with_caching(true)
-            .with_stealth(true)
-            .with_fingerprint(true)
-            .with_chrome_intercept(interception, &None)
-            .with_wait_for_idle_network(Some(WaitForIdleNetwork::new(Some(Duration::from_millis(
-                500,
-            )))))
-            .to_owned(),
-    );
 
-    let app_handle = handle.app_handle().clone();
+    let crawled = run_crawler(&target_url.to_string()).await.unwrap();
+    println!("{:?}", crawled);
 
-    let event_id = app_handle.listen("status-changed", move |event| {
-        let website = website.clone();
-        let app_handle2 = handle.app_handle().clone();
-        let reader_guard = reader_guard.clone();
+    // let app_handle = handle.app_handle().clone();
 
-        tauri::async_runtime::spawn(async move {
-            reader_guard
-                .lock()
-                .await
-                .send("Crawler Stopped".to_string())
-                .unwrap();
-            website.lock().await.unsubscribe();
-            website.lock().await.stop();
-        });
-    });
-    let website = website_rc.clone();
+    // let event_id = app_handle.listen("status-changed", move |event| {
+    //     let website = website.clone();
+    //     let app_handle2 = handle.app_handle().clone();
+    //     let reader_guard = reader_guard.clone();
+    //     let worker_task = worker_task.clone();
+    //     tauri::async_runtime::spawn(async move {
+    //         reader_guard
+    //             .lock()
+    //             .await
+    //             .send("Crawler Stopped".to_string())
+    //             .unwrap();
+    //         worker_task.abort();
+    //         website.lock().await.unsubscribe();
+    //         website.lock().await.stop();
+    //     });
+    // });
 
-    let mut rx2 = website.lock().await.subscribe(0).unwrap();
-
-    let stdout_guard = stdout.clone();
-    tokio::spawn(async move {
-        let conf = TransformConfig {
-            return_format: ReturnFormat::Markdown,
-            readability: true,
-            filter_images: true,
-            clean_html: true,
-            filter_svg: true,
-            main_content: true,
-        };
-
-        while let Ok(res) = rx2.recv().await {
-            if is_binary_file(res.get_html_bytes_u8()) {
-                continue;
-            }
-
-            let markup = transform_content(&res, &conf, &None, &None, &None);
-
-            let mut stdout = stdout_guard.lock().await;
-
-            stdout
-                .write_all(format!("- {}\n {}\n\n\n", res.get_url(), markup).as_bytes())
-                .await
-                .unwrap();
-
-            stdout.flush().await.unwrap();
-        }
-    });
-
-    let start = std::time::Instant::now();
-    website.lock().await.crawl_smart().await;
-    website.lock().await.unsubscribe();
-    let duration = start.elapsed();
-    let stdout_guard = stdout.clone();
-    let mut stdout = stdout_guard.lock().await;
-
-    let _ = stdout
-        .write_all(
-            format!(
-                "Time elapsed in website.crawl() is: {:?} for total pages: {:?}\n",
-                duration,
-                website.lock().await.get_size().await
-            )
-            .as_bytes(),
-        )
-        .await;
-    stdout.flush().await.unwrap();
-
-    app_handle.unlisten(event_id);
+    // app_handle.unlisten(event_id);
     Ok(())
 }
 
