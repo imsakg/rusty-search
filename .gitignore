@@ -24,3 +24,4 @@ vite.config.ts.timestamp-*
 
 # Tauri
 src-tauri/http-cacache/
+src-tauri/db

@@ -30,15 +30,16 @@
 		const onEvent = new Channel();
 
 		onEvent.onmessage = (message: any) => {
-			console.log(`stopped event ${message.event}`);
+			console.log(`stopped event ${message}`);
 		};
 
 		if (!$crawlingStatus) {
 			$crawlingStatus = true;
+
 			await invoke('start_crawler', { targetUrl: 'https://python.org', reader: onEvent });
 			$crawlingStatus = false;
 		} else {
-			await emit('status-changed', { status: 'stop' });
+			await emit('status-changed', 'shutdown');
 			$crawlingStatus = false;
 		}
 	}

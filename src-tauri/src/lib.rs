@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::future::IntoFuture;
 use std::io::Read;
 use std::time::Duration;
 use std::{fs::File, io::Write};
@@ -17,6 +19,12 @@ use tauri_plugin_log::fern::colors::ColoredLevelConfig;
 use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 
+use serde::{Deserialize, Serialize};
+use surrealdb::RecordId;
+use surrealdb::Surreal;
+
+use surrealdb::engine::local::{Db, SurrealKv};
+
 use spider_utils::spider_transformations::transformation::content::{
     transform_content, ReturnFormat, TransformConfig,
 };
@@ -25,9 +33,16 @@ use url::Url;
 
 pub mod crawler;
 
-#[derive(Default)]
+#[derive(Serialize, Deserialize)]
+struct Page {
+    id: RecordId,
+    url: String,
+    content: String,
+}
+
 struct AppState {
     url_list: HashSet<Url>,
+    db: Arc<Mutex<Surreal<Db>>>,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -70,34 +85,82 @@ async fn start_crawler(
     let target_url = Url::parse(&target_url).unwrap();
     let website_rc = Arc::new(tokio::sync::Mutex::new(Website::new(target_url.as_str())));
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let tx = Arc::new(tx);
+    let tx2 = tx.clone();
+
+    let app_handle = handle.clone();
+    let website_handle = website_rc.clone();
+
+    let crawler_task_handle = tokio::spawn(async move {
+        let response = run_crawler(website_handle.clone()).await.unwrap();
+        tx2.send("continue".to_string()).await.unwrap();
+        response
+    });
+
+    let crawler_task_guard = Arc::new(tokio::sync::Mutex::new(crawler_task_handle));
+    let crawler_task_guard2 = crawler_task_guard.clone();
+
+    let event_id = handle.listen("status-changed", move |event| {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            tx.send(event.payload().to_string()).await.unwrap();
+        });
+    });
+
+    let website_handle = website_rc.clone();
+
+    let shutdown_task_handler = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let msg = msg.trim_matches('"');
+            match msg {
+                "continue" => {
+                    let mut guard = website_handle.lock().await;
+                    guard.unsubscribe();
+                    guard.stop();
+                    guard.clear_all().await;
+                    break;
+                }
+                "shutdown" => {
+                    println!("Shutting down crawler");
+                    let mut guard = website_handle.lock().await;
+                    guard.unsubscribe();
+                    guard.stop();
+                    guard.clear_all().await;
+                    crawler_task_guard2.lock().await.abort();
+                    break;
+                }
+                _ => {
+                    println!("Unknown message: {}", msg);
+                }
+            }
+        }
+    });
+
     println!("Starting crawler for {}", target_url);
 
     let t1 = Instant::now();
-    let crawled = run_crawler(website_rc.clone()).await.unwrap();
-    let tt = t1.elapsed();
+    shutdown_task_handler.await.unwrap();
+    if let Ok(crawled) = Arc::try_unwrap(crawler_task_guard)
+        .map_err(|e| anyhow::anyhow!("{:?}", e))
+        .unwrap()
+        .into_inner()
+        .await
+    {
+        let tt = t1.elapsed();
+        println!("Crawled {} pages in {:?}", crawled.len(), tt);
+    } else {
+        println!("Crawler task failed");
+    }
 
-    println!("Crawled {} pages in {:?}", crawled.len(), tt);
+    let visited_pages = website_rc.lock().await.get_all_links_visited().await;
 
-    // let app_handle = handle.app_handle().clone();
+    for page in visited_pages.iter() {
+        println!("{}", page);
+    }
+    println!("Visited {} pages", visited_pages.len());
 
-    // let event_id = app_handle.listen("status-changed", move |event| {
-    //     let website = website.clone();
-    //     let app_handle2 = handle.app_handle().clone();
-    //     let reader_guard = reader_guard.clone();
-    //     let worker_task = worker_task.clone();
-    //     tauri::async_runtime::spawn(async move {
-    //         reader_guard
-    //             .lock()
-    //             .await
-    //             .send("Crawler Stopped".to_string())
-    //             .unwrap();
-    //         worker_task.abort();
-    //         website.lock().await.unsubscribe();
-    //         website.lock().await.stop();
-    //     });
-    // });
-
-    // app_handle.unlisten(event_id);
+    handle.unlisten(event_id);
     Ok(())
 }
 
@@ -134,7 +197,14 @@ pub fn run() {
             //     )?;
             // }
             // Initialize the app state
-            app.manage(Mutex::new(AppState::default()));
+            futures::executor::block_on(async {
+                let db = Surreal::new::<SurrealKv>("./db/").await.unwrap();
+                let db = Arc::new(Mutex::new(db));
+                app.manage(Mutex::new(AppState {
+                    url_list: HashSet::new(),
+                    db,
+                }));
+            });
 
             // Load sites from file
             {

@@ -22,7 +22,7 @@ pub enum Content {
 pub async fn run_crawler(crawler: Arc<Mutex<Website>>) -> Result<HashMap<String, Option<Content>>> {
     crawler.lock().await.with_config(
         Configuration::new()
-            .with_limit(10000)
+            .with_limit(10)
             .with_block_assets(true)
             .with_caching(true)
             .with_stealth(true)
@@ -38,7 +38,7 @@ pub async fn run_crawler(crawler: Arc<Mutex<Website>>) -> Result<HashMap<String,
     let map = Arc::new(Mutex::new(HashMap::new()));
 
     let map_guard = map.clone();
-    tokio::spawn(async move {
+    let task_handle = tokio::spawn(async move {
         let conf = TransformConfig {
             return_format: ReturnFormat::Markdown,
             readability: true,
@@ -51,6 +51,7 @@ pub async fn run_crawler(crawler: Arc<Mutex<Website>>) -> Result<HashMap<String,
             let content;
             let markup;
             let mut map = map_guard.lock().await;
+            println!("Received: {}", res.get_url());
 
             if let Some(b) = res.get_bytes() {
                 if is_binary_file(b) || b.len() > 1024 * 1024 {
@@ -70,6 +71,11 @@ pub async fn run_crawler(crawler: Arc<Mutex<Website>>) -> Result<HashMap<String,
 
     crawler.lock().await.crawl_smart().await;
     crawler.lock().await.unsubscribe();
-    let map = Arc::try_unwrap(map).unwrap().into_inner();
+    task_handle.await?;
+
+    let map = Arc::try_unwrap(map)
+        .map_err(|_| anyhow::anyhow!("Could not unwrap map"))?
+        .into_inner();
+
     anyhow::Result::Ok(map)
 }
