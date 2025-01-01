@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use spider::website::Website;
 use spider::{configuration::Configuration, tokio};
 
@@ -13,7 +14,7 @@ use spider_utils::spider_transformations::transformation::content::{
 };
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum Content {
     Text(String),
     Binary,

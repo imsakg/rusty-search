@@ -1,22 +1,16 @@
-use std::cell::RefCell;
-use std::future::IntoFuture;
 use std::io::Read;
-use std::time::Duration;
 use std::{fs::File, io::Write};
 
 use anyhow::Result;
-use crawler::run_crawler;
-use spider::auto_encoder::is_binary_file;
-use spider::configuration::{Configuration, WaitForIdleNetwork};
-use spider::features::chrome_common::RequestInterceptConfiguration;
-use spider::hashbrown::HashSet;
+use crawler::{run_crawler, Content};
+use futures::StreamExt;
+use spider::hashbrown::{HashMap, HashSet};
 use spider::tokio;
 use spider::website::Website;
 use std::sync::{Arc, Mutex};
 use tauri::{path::BaseDirectory, Manager};
 use tauri::{Emitter, Listener};
 use tauri_plugin_log::fern::colors::ColoredLevelConfig;
-use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -25,25 +19,11 @@ use surrealdb::Surreal;
 
 use surrealdb::engine::local::{Db, SurrealKv};
 
-use spider_utils::spider_transformations::transformation::content::{
-    transform_content, ReturnFormat, TransformConfig,
-};
 
 use url::Url;
 
 pub mod crawler;
-
-#[derive(Serialize, Deserialize)]
-struct Page {
-    id: RecordId,
-    url: String,
-    content: String,
-}
-
-struct AppState {
-    url_list: HashSet<Url>,
-    db: Arc<Mutex<Surreal<Db>>>,
-}
+pub mod types;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -52,7 +32,7 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn get_sitelist(state: tauri::State<'_, Mutex<AppState>>) -> Vec<String> {
+fn get_sitelist(state: tauri::State<'_, Mutex<types::AppState>>) -> Vec<String> {
     let state = state.lock().unwrap();
 
     state.url_list.iter().map(|url| url.to_string()).collect()
@@ -60,7 +40,7 @@ fn get_sitelist(state: tauri::State<'_, Mutex<AppState>>) -> Vec<String> {
 
 #[tauri::command]
 fn write_state_to_db(
-    state: tauri::State<'_, Mutex<AppState>>,
+    state: tauri::State<'_, Mutex<types::AppState>>,
     app_handle: tauri::AppHandle,
 ) -> bool {
     let state = state.lock().unwrap();
@@ -75,6 +55,19 @@ fn write_state_to_db(
     }
     true
 }
+
+// async fn save_to_db(
+//     db: Arc<tokio::sync::Mutex<Surreal<Db>>>,
+//     pages: Vec<types::Page>,
+// ) -> Result<RecordId> {
+//     let db = db.lock().await;
+//     let created: Option<types::Record> = db.create("pages").content(pages).await.map_err(|e| {
+//         log::error!("Error saving to db: {:?}", e);
+//         e
+//     })?;
+
+//     Ok(created.unwrap().id)
+// }
 
 #[tauri::command(async)]
 async fn start_crawler(
@@ -113,9 +106,9 @@ async fn start_crawler(
     let shutdown_task_handler = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let msg = msg.trim_matches('"');
+            let mut guard = website_handle.lock().await;
             match msg {
                 "continue" => {
-                    let mut guard = website_handle.lock().await;
                     guard.unsubscribe();
                     guard.stop();
                     guard.clear_all().await;
@@ -123,7 +116,6 @@ async fn start_crawler(
                 }
                 "shutdown" => {
                     println!("Shutting down crawler");
-                    let mut guard = website_handle.lock().await;
                     guard.unsubscribe();
                     guard.stop();
                     guard.clear_all().await;
@@ -149,23 +141,67 @@ async fn start_crawler(
     {
         let tt = t1.elapsed();
         println!("Crawled {} pages in {:?}", crawled.len(), tt);
+
+        for (url, content) in crawled.into_iter() {
+            if let Some(content) = content {
+            match content {
+                Content::Text(text) => {
+                    // save url to URLs table
+                    let db = handle.state::<Mutex<types::AppState>>().lock().unwrap().db.clone();
+                    let db = db.lock().await;
+                    // check if URL already exists
+                    
+                    let response: Vec<types::Url> = db.query(format!( "SELECT * FROM urls WHERE address = '{}'", &url)).await.unwrap().take(0).unwrap();
+                    
+                    if let Some(url_record) = response.first() {
+                        // url_id = url_record.clone().id.unwrap();
+                        println!("URL already exists: {:?}", url_record);
+                    } else {
+                    let url = types::Url { id:None, address: url };
+                    let response: Option<types::Record> = db.create("urls").content(url.clone()).await.unwrap();
+                    let url_id = response.unwrap().id;
+
+                    // save page to Pages table
+                    let page = types::Page {
+                        content: text,
+                        id: None,
+                        url: url_id
+                    };
+                    let response: Option<types::Record> = db.create("pages").content(page).await.unwrap();
+                    if let Some(page_record) = response {
+                        log::debug!("Saved Page: {:?}", page_record);
+                    } else { 
+                        log::error!("Failed to save page");
+                    }
+                }
+                    }
+                Content::Binary => {
+                    log::warn!("{}: Binary content", url);
+                }
+            }
+            } else {
+                log::warn!("{}: No content", url);
+            }
+            
+        }
+
     } else {
         println!("Crawler task failed");
     }
 
-    let visited_pages = website_rc.lock().await.get_all_links_visited().await;
+    // let visited_pages = website_rc.lock().await.get_all_links_visited().await;
 
-    for page in visited_pages.iter() {
-        println!("{}", page);
-    }
-    println!("Visited {} pages", visited_pages.len());
+    // for page in visited_pages.iter() {
+    //     println!("{}", page);
+    // }
+    // println!("Visited {} pages", visited_pages.len());
 
     handle.unlisten(event_id);
     Ok(())
 }
 
 #[tauri::command]
-fn add_new_url(state: tauri::State<'_, Mutex<AppState>>, url: String) -> tauri::Result<bool> {
+fn add_new_url(state: tauri::State<'_, Mutex<types::AppState>>, url: String) -> tauri::Result<bool> {
     if let Ok(url) = Url::parse(&url) {
         log::debug!("Parsed URL: {}", url);
         let mut state = state.lock().unwrap();
@@ -197,14 +233,54 @@ pub fn run() {
             //     )?;
             // }
             // Initialize the app state
-            futures::executor::block_on(async {
+            let db = futures::executor::block_on(async {
+                // check if directory already exists
+                let query;
+                if let Ok(_) = tokio::fs::metadata("./db/").await {
+                    log::debug!("Database directory exists");
+                    query = None;
+                }else {
+                    query =Some( r#"
+                        -- Define the URL table with a unique constraint on the address
+                        DEFINE TABLE urls SCHEMAFULL;
+                        DEFINE FIELD address ON TABLE urls TYPE string;
+                        DEFINE INDEX urlAddressIndex ON TABLE urls COLUMNS address UNIQUE;
+
+                        -- Define the Page table with a reference to the URL and content
+                        DEFINE TABLE pages SCHEMAFULL;
+                        DEFINE FIELD url ON TABLE pages TYPE record<urls>;
+                        DEFINE FIELD content ON TABLE pages TYPE string;
+
+                        -- Define the ScrapedPages table with a base URL and an array of pages
+                        DEFINE TABLE scrapedPages SCHEMAFULL;
+                        DEFINE FIELD base ON TABLE scrapedPages TYPE record<url>;
+                        DEFINE FIELD pages ON TABLE scrapedPages TYPE array<record<page>>;
+
+                        -- Define a full-text search analyzer
+                        DEFINE ANALYZER custom_analyzer TOKENIZERS blank FILTERS lowercase;
+
+                        -- Define full-text search indexes on the content and url fields of the Page table
+                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase;
+
+                        DEFINE INDEX page_url ON pages FIELDS url.address SEARCH ANALYZER page_analyzer BM25(1.2,0.75);
+                        DEFINE INDEX page_content ON pages FIELDS content SEARCH ANALYZER page_analyzer BM25(1.2,0.75) HIGHLIGHTS;
+                    "#);
+                }
+
+                
                 let db = Surreal::new::<SurrealKv>("./db/").await.unwrap();
-                let db = Arc::new(Mutex::new(db));
-                app.manage(Mutex::new(AppState {
-                    url_list: HashSet::new(),
-                    db,
-                }));
+                db.use_ns("test").use_db("test").await.unwrap();
+                if let Some(query) = query {
+                    db.query(query).await.unwrap();
+                }
+
+                Arc::new(tokio::sync::Mutex::new(db))
             });
+
+            app.manage(Mutex::new(types::AppState {
+                url_list: HashSet::new(),
+                db,
+            }));
 
             // Load sites from file
             {
@@ -215,7 +291,7 @@ pub fn run() {
                 let mut buf: String = String::new();
                 File::open(&resource_path)?.read_to_string(&mut buf)?;
                 let urls: Vec<&str> = buf.split("\n").collect();
-                let guard = app.state::<Mutex<AppState>>();
+                let guard = app.state::<Mutex<types::AppState>>();
                 let mut state = guard.lock().unwrap();
                 for url in urls {
                     if let Ok(url) = Url::parse(url) {
