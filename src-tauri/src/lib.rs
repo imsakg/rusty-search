@@ -62,6 +62,7 @@ async fn query_db(
 ) -> tauri::Result<Vec<types::QueryResult>> {
     let db = state.lock().unwrap().db.clone();
     let db = db.lock().await;
+    let query = query.to_lowercase();
     let query_str = format!(r#"
         SELECT
             id,
@@ -77,6 +78,19 @@ async fn query_db(
 
     let mut result = db.query(query_str).await.unwrap();
     let result: Vec<types::QueryResult> = result.take(0).unwrap();
+    let result: Vec<types::QueryResult> =result.into_iter().map(|obj| {
+        let (begin, end) = (obj.highlight.find("<b>"), obj.highlight.find("</b>"));
+        if let (Some(begin), Some(end)) = (begin, end) {
+            let striped_obj = obj.highlight[ begin.saturating_sub(  30)  ..  usize::min(end +30, obj.highlight.len())].to_string().replace("<b>", "").replace("</b>", "");
+            return types::QueryResult {
+                highlight: striped_obj,
+                ..obj
+            }
+        }
+
+        obj
+    }).collect();
+
     Ok(result)
 }
 
@@ -108,7 +122,7 @@ async fn start_crawler(
     let event_id = handle.listen("status-changed", move |event| {
         let tx = tx.clone();
         tokio::spawn(async move {
-            tx.send(event.payload().to_string()).await.unwrap();
+            let _ = tx.send(event.payload().to_string()).await;
         });
     });
 
@@ -271,7 +285,7 @@ pub fn run() {
                         DEFINE ANALYZER custom_analyzer TOKENIZERS blank FILTERS lowercase;
 
                         -- Define full-text search indexes on the content and url fields of the Page table
-                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase, ngram(1,3);
+                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase, ngram(1,16);
 
 
                         DEFINE INDEX page_url ON pages FIELDS url.address SEARCH ANALYZER page_analyzer BM25(1.2,0.75);
