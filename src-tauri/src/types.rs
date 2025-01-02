@@ -18,6 +18,14 @@ pub struct Url {
     pub address: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueryResult {
+    pub id: RecordId,
+    pub address: String,
+    pub highlight: String,
+    pub score: f64,
+}
+
 // Define the Page structure
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Page {

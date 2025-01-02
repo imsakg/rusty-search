@@ -1,7 +1,6 @@
 use std::io::Read;
 use std::{fs::File, io::Write};
 
-use anyhow::Result;
 use crawler::{run_crawler, Content};
 use futures::StreamExt;
 use spider::hashbrown::{HashMap, HashSet};
@@ -56,18 +55,30 @@ fn write_state_to_db(
     true
 }
 
-// async fn save_to_db(
-//     db: Arc<tokio::sync::Mutex<Surreal<Db>>>,
-//     pages: Vec<types::Page>,
-// ) -> Result<RecordId> {
-//     let db = db.lock().await;
-//     let created: Option<types::Record> = db.create("pages").content(pages).await.map_err(|e| {
-//         log::error!("Error saving to db: {:?}", e);
-//         e
-//     })?;
+#[tauri::command(async)]
+async fn query_db(
+    state: tauri::State<'_, Mutex<types::AppState>>,
+    query: String,
+) -> tauri::Result<Vec<types::QueryResult>> {
+    let db = state.lock().unwrap().db.clone();
+    let db = db.lock().await;
+    let query_str = format!(r#"
+        SELECT
+            id,
+            url.address AS address,
+            search::highlight('<b>', '</b>', 1, true) AS highlight,
+            search::score(0) * 2 + search::score(1) * 1 AS score
+        FROM pages
+        WHERE url.address @0@ '{query}'
+        OR content @1@ '{query}'
+        ORDER BY score DESC
+        LIMIT 10;
+    "#);
 
-//     Ok(created.unwrap().id)
-// }
+    let mut result = db.query(query_str).await.unwrap();
+    let result: Vec<types::QueryResult> = result.take(0).unwrap();
+    Ok(result)
+}
 
 #[tauri::command(async)]
 async fn start_crawler(
@@ -260,7 +271,8 @@ pub fn run() {
                         DEFINE ANALYZER custom_analyzer TOKENIZERS blank FILTERS lowercase;
 
                         -- Define full-text search indexes on the content and url fields of the Page table
-                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase;
+                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase, ngram(1,3);
+
 
                         DEFINE INDEX page_url ON pages FIELDS url.address SEARCH ANALYZER page_analyzer BM25(1.2,0.75);
                         DEFINE INDEX page_content ON pages FIELDS content SEARCH ANALYZER page_analyzer BM25(1.2,0.75) HIGHLIGHTS;
@@ -334,7 +346,8 @@ pub fn run() {
             greet,
             get_sitelist,
             add_new_url,
-            start_crawler
+            start_crawler,
+            query_db
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
