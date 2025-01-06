@@ -67,7 +67,10 @@
 		>{progress !== null ? `${progress.toFixed(2)}%` : 'waiting to start'}</Progress
 	>
 	<div class="flex w-full place-items-center items-center justify-center space-x-4">
-		<input type="checkbox" id="quick" name="quick" bind:checked={quick} />
+		<div class="items-center justify-items-center">
+			<label for="quick">Quick Mode</label>
+			<input type="checkbox" id="quick" name="quick" bind:checked={quick} />
+		</div>
 		<input
 			type="button"
 			class="btn bg-primary-400-600"

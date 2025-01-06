@@ -1,8 +1,11 @@
 use std::io::Read;
+use std::time::Duration;
 use std::{fs::File, io::Write};
 
 use crawler::{run_crawler, Content};
 use futures::StreamExt;
+use spider::configuration::{Configuration, WaitForIdleNetwork};
+use spider::features::chrome_common::RequestInterceptConfiguration;
 use spider::hashbrown::{HashMap, HashSet};
 use spider::tokio;
 use spider::website::Website;
@@ -61,7 +64,7 @@ async fn query_db(
     query: String,
 ) -> tauri::Result<Vec<types::QueryResult>> {
     let db = state.lock().unwrap().db.clone();
-    let db = db.lock().await;
+    
     let query = query.to_lowercase();
     let query_str = format!(r#"
         SELECT
@@ -76,7 +79,7 @@ async fn query_db(
         LIMIT 10;
     "#);
 
-    let mut result = db.query(query_str).await.unwrap();
+    let mut result = db.lock().await.query(query_str).await.unwrap();
     let result: Vec<types::QueryResult> = result.take(0).unwrap();
     let result: Vec<types::QueryResult> =result.into_iter().map(|obj| {
         let (begin, end) = (obj.highlight.find("<b>"), obj.highlight.find("</b>"));
@@ -102,16 +105,29 @@ async fn start_crawler(
 ) -> tauri::Result<()> {
     let target_url = Url::parse(&target_url).unwrap();
     let website_rc = Arc::new(tokio::sync::Mutex::new(Website::new(target_url.as_str())));
-
+    website_rc.lock().await.with_config(
+        Configuration::new()
+            .with_limit(10)
+            .with_block_assets(true)
+            .with_caching(true)
+            .with_chrome_intercept(RequestInterceptConfiguration::new(true), &None)
+            .with_stealth(true)
+            .with_fingerprint(true)
+            .with_wait_for_idle_network(Some(WaitForIdleNetwork::new(Some(Duration::from_millis(
+                500,
+            )))))
+            .to_owned(),
+    );
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     let tx = Arc::new(tx);
     let tx2 = tx.clone();
 
     let app_handle = handle.clone();
     let website_handle = website_rc.clone();
+    let db = handle.state::<Mutex<types::AppState>>().lock().unwrap().db.clone();
 
     let crawler_task_handle = tokio::spawn(async move {
-        let response = run_crawler(website_handle.clone()).await.unwrap();
+        let response = run_crawler(website_handle.clone(), db).await.unwrap();
         tx2.send("continue".to_string()).await.unwrap();
         response
     });
@@ -156,60 +172,14 @@ async fn start_crawler(
 
     println!("Starting crawler for {}", target_url);
 
-    let t1 = Instant::now();
     shutdown_task_handler.await.unwrap();
-    if let Ok(crawled) = Arc::try_unwrap(crawler_task_guard)
+    if let Ok(execution_time) = Arc::try_unwrap(crawler_task_guard)
         .map_err(|e| anyhow::anyhow!("{:?}", e))
         .unwrap()
         .into_inner()
         .await
     {
-        let tt = t1.elapsed();
-        println!("Crawled {} pages in {:?}", crawled.len(), tt);
-
-        for (url, content) in crawled.into_iter() {
-            if let Some(content) = content {
-            match content {
-                Content::Text(text) => {
-                    // save url to URLs table
-                    let db = handle.state::<Mutex<types::AppState>>().lock().unwrap().db.clone();
-                    let db = db.lock().await;
-                    // check if URL already exists
-                    
-                    let response: Vec<types::Url> = db.query(format!( "SELECT * FROM urls WHERE address = '{}'", &url)).await.unwrap().take(0).unwrap();
-                    
-                    if let Some(url_record) = response.first() {
-                        // url_id = url_record.clone().id.unwrap();
-                        println!("URL already exists: {:?}", url_record);
-                    } else {
-                    let url = types::Url { id:None, address: url };
-                    let response: Option<types::Record> = db.create("urls").content(url.clone()).await.unwrap();
-                    let url_id = response.unwrap().id;
-
-                    // save page to Pages table
-                    let page = types::Page {
-                        content: text,
-                        id: None,
-                        url: url_id
-                    };
-                    let response: Option<types::Record> = db.create("pages").content(page).await.unwrap();
-                    if let Some(page_record) = response {
-                        log::debug!("Saved Page: {:?}", page_record);
-                    } else { 
-                        log::error!("Failed to save page");
-                    }
-                }
-                    }
-                Content::Binary => {
-                    log::warn!("{}: Binary content", url);
-                }
-            }
-            } else {
-                log::warn!("{}: No content", url);
-            }
-            
-        }
-
+        println!("Crawler task completed in {:?}", execution_time.elapsed());
     } else {
         println!("Crawler task failed");
     }
@@ -260,12 +230,12 @@ pub fn run() {
             // Initialize the app state
             let db = futures::executor::block_on(async {
                 // check if directory already exists
-                let query;
-                if let Ok(_) = tokio::fs::metadata("./db/").await {
+                let query = {
+                if (tokio::fs::metadata("./db/").await).is_ok() {
                     log::debug!("Database directory exists");
-                    query = None;
+                    None
                 }else {
-                    query =Some( r#"
+                    Some( r#"
                         -- Define the URL table with a unique constraint on the address
                         DEFINE TABLE urls SCHEMAFULL;
                         DEFINE FIELD address ON TABLE urls TYPE string;
@@ -282,17 +252,17 @@ pub fn run() {
                         DEFINE FIELD pages ON TABLE scrapedPages TYPE array<record<page>>;
 
                         -- Define a full-text search analyzer
-                        DEFINE ANALYZER custom_analyzer TOKENIZERS blank FILTERS lowercase;
+                        DEFINE ANALYZER custom_analyzer TOKENIZERS blank,punct FILTERS lowercase;
 
                         -- Define full-text search indexes on the content and url fields of the Page table
-                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase, ngram(1,16);
+                        DEFINE ANALYZER page_analyzer TOKENIZERS blank,class,camel,punct FILTERS lowercase,ngram(1,5);
 
 
                         DEFINE INDEX page_url ON pages FIELDS url.address SEARCH ANALYZER page_analyzer BM25(1.2,0.75);
                         DEFINE INDEX page_content ON pages FIELDS content SEARCH ANALYZER page_analyzer BM25(1.2,0.75) HIGHLIGHTS;
-                    "#);
-                }
-
+                        "#)
+                    }
+                };
                 
                 let db = Surreal::new::<SurrealKv>("./db/").await.unwrap();
                 db.use_ns("test").use_db("test").await.unwrap();
